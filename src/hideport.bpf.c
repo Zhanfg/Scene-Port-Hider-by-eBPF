@@ -1,8 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0
 #include "vmlinux.h"
 #include <bpf/bpf_core_read.h>
+#include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
+
+#define REDIRECT_CONNECT_PORT 1
+#define IPV4_LOOPBACK_PREFIX 0x7f000000U
+#define PORT_ORDER_NET 1
+#define PORT_ORDER_HOST 2
+#define MIN_SOCKADDR_PORT_LEN 4
+#define MIN_SOCKADDR_IN_LEN 8
+#define MIN_SOCKADDR_IN6_LEN 24
 
 #ifndef AF_INET
 #define AF_INET 2
@@ -12,11 +21,9 @@
 #define AF_INET6 10
 #endif
 
-#define MIN_SOCKADDR_PORT_LEN 4
-
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 16);
+    __uint(max_entries, 32);
     __type(key, __u16);
     __type(value, __u8);
 } target_ports SEC(".maps");
@@ -28,11 +35,135 @@ struct {
     __type(value, __u8);
 } allowed_uids SEC(".maps");
 
+struct bind_attempt_state {
+    __s32 fd;
+    __u16 port;
+};
+
+struct bind_rewrite_state {
+    __u64 uaddr;
+    __u16 port;
+};
+
+struct fd_port_key {
+    __u32 tgid;
+    __s32 fd;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 1024);
+    __type(key, __u64);
+    __type(value, struct bind_attempt_state);
+} pending_bind_attempts SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 1024);
+    __type(key, struct fd_port_key);
+    __type(value, __u16);
+} fd_bound_ports SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 1024);
+    __type(key, __u64);
+    __type(value, struct bind_rewrite_state);
+} pending_getsockname SEC(".maps");
+
 char LICENSE[] SEC("license") = "GPL";
 
-static __always_inline int read_bind_port(const void *uaddr, int addrlen, __u16 *port)
+static __always_inline struct fd_port_key make_fd_key(__s32 fd)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    struct fd_port_key key = {};
+
+    key.tgid = (__u32)(pid_tgid >> 32);
+    key.fd = fd;
+    return key;
+}
+
+static __always_inline int uid_is_allowed(void)
+{
+    __u32 uid = (__u32)bpf_get_current_uid_gid();
+    __u8 *match = bpf_map_lookup_elem(&allowed_uids, &uid);
+
+    return match != 0;
+}
+
+static __always_inline __u8 target_port_order(__u16 port)
+{
+    __u8 *match = bpf_map_lookup_elem(&target_ports, &port);
+
+    if (!match)
+        return 0;
+
+    return *match;
+}
+
+static __always_inline int is_ipv4_local_probe(__u32 ip4)
+{
+    if (ip4 == 0)
+        return 1;
+
+    if ((ip4 & 0xff000000U) == IPV4_LOOPBACK_PREFIX)
+        return 1;
+
+    return (bpf_ntohl(ip4) & 0xff000000U) == IPV4_LOOPBACK_PREFIX;
+}
+
+static __always_inline int is_ipv6_local_probe(__u32 ip0, __u32 ip1,
+                                               __u32 ip2, __u32 ip3)
+{
+    if (ip0 != 0 || ip1 != 0)
+        return 0;
+
+    if (ip2 == 0)
+        return ip3 == 0 || ip3 == bpf_htonl(1) || ip3 == 1;
+
+    if (ip2 == 0x0000ffffU || ip2 == bpf_htonl(0x0000ffffU))
+        return is_ipv4_local_probe(ip3);
+
+    return 0;
+}
+
+static __always_inline __u8 hideport_redirect_order(__u16 port)
+{
+    __u8 order = target_port_order(port);
+
+    if (!order)
+        return 0;
+
+    if (uid_is_allowed())
+        return 0;
+
+    return order;
+}
+
+static __always_inline __u16 port_for_sockaddr(__u16 port, __u8 order)
+{
+    if (order == PORT_ORDER_HOST)
+        return bpf_htons(port);
+
+    return port;
+}
+
+static __always_inline void redirect_connect_port(struct bpf_sock_addr *ctx,
+                                                  __u8 order)
+{
+    if (order == PORT_ORDER_HOST)
+        ctx->user_port = REDIRECT_CONNECT_PORT;
+    else
+        ctx->user_port = bpf_htons(REDIRECT_CONNECT_PORT);
+}
+
+static __always_inline int read_target_local_sockaddr(const void *uaddr,
+                                                      int addrlen,
+                                                      __u16 *sockaddr_port)
 {
     __u16 family = 0;
+    __u16 port = 0;
+    __u8 order;
 
     if (!uaddr || addrlen < MIN_SOCKADDR_PORT_LEN)
         return 0;
@@ -40,63 +171,256 @@ static __always_inline int read_bind_port(const void *uaddr, int addrlen, __u16 
     if (bpf_probe_read_user(&family, sizeof(family), uaddr) < 0)
         return 0;
 
-    if (family != AF_INET && family != AF_INET6)
+    if (bpf_probe_read_user(&port, sizeof(port), (const char *)uaddr + 2) < 0)
         return 0;
 
-    if (bpf_probe_read_user(port, sizeof(*port), (const char *)uaddr + 2) < 0)
+    order = hideport_redirect_order(port);
+    if (!order)
         return 0;
+
+    if (family == AF_INET) {
+        __u32 ip4 = 0;
+
+        if (addrlen < MIN_SOCKADDR_IN_LEN)
+            return 0;
+
+        if (bpf_probe_read_user(&ip4, sizeof(ip4), (const char *)uaddr + 4) < 0)
+            return 0;
+
+        if (!is_ipv4_local_probe(ip4))
+            return 0;
+    } else if (family == AF_INET6) {
+        __u32 ip0 = 0;
+        __u32 ip1 = 0;
+        __u32 ip2 = 0;
+        __u32 ip3 = 0;
+
+        if (addrlen < MIN_SOCKADDR_IN6_LEN)
+            return 0;
+
+        if (bpf_probe_read_user(&ip0, sizeof(ip0), (const char *)uaddr + 8) < 0 ||
+            bpf_probe_read_user(&ip1, sizeof(ip1), (const char *)uaddr + 12) < 0 ||
+            bpf_probe_read_user(&ip2, sizeof(ip2), (const char *)uaddr + 16) < 0 ||
+            bpf_probe_read_user(&ip3, sizeof(ip3), (const char *)uaddr + 20) < 0)
+            return 0;
+
+        if (!is_ipv6_local_probe(ip0, ip1, ip2, ip3))
+            return 0;
+    } else {
+        return 0;
+    }
+
+    *sockaddr_port = port_for_sockaddr(port, order);
+    return 1;
+}
+
+static __always_inline int hideport_maybe_rewrite_bind(struct bpf_sock_addr *ctx)
+{
+    __u16 port = (__u16)ctx->user_port;
+    __u8 order = hideport_redirect_order(port);
+
+    if (!order)
+        return 1;
+
+    ctx->user_port = 0;
+    return 1;
+}
+
+SEC("cgroup/connect4")
+int hideport_connect4(struct bpf_sock_addr *ctx)
+{
+    __u16 port = (__u16)ctx->user_port;
+    __u8 order;
+
+    if (!is_ipv4_local_probe(ctx->user_ip4))
+        return 1;
+
+    order = hideport_redirect_order(port);
+    if (order)
+        redirect_connect_port(ctx, order);
 
     return 1;
 }
 
-static __always_inline int hideport_maybe_rewrite(struct pt_regs *ctx,
-                                                  const void *uaddr,
-                                                  int addrlen)
+SEC("cgroup/bind4")
+int hideport_bind4(struct bpf_sock_addr *ctx)
 {
+    if (!is_ipv4_local_probe(ctx->user_ip4))
+        return 1;
+
+    return hideport_maybe_rewrite_bind(ctx);
+}
+
+SEC("cgroup/connect6")
+int hideport_connect6(struct bpf_sock_addr *ctx)
+{
+    __u16 port = (__u16)ctx->user_port;
+    __u32 ip0 = ctx->user_ip6[0];
+    __u32 ip1 = ctx->user_ip6[1];
+    __u32 ip2 = ctx->user_ip6[2];
+    __u32 ip3 = ctx->user_ip6[3];
+    __u8 order;
+
+    if (!is_ipv6_local_probe(ip0, ip1, ip2, ip3))
+        return 1;
+
+    order = hideport_redirect_order(port);
+    if (order)
+        redirect_connect_port(ctx, order);
+
+    return 1;
+}
+
+SEC("cgroup/bind6")
+int hideport_bind6(struct bpf_sock_addr *ctx)
+{
+    __u32 ip0 = ctx->user_ip6[0];
+    __u32 ip1 = ctx->user_ip6[1];
+    __u32 ip2 = ctx->user_ip6[2];
+    __u32 ip3 = ctx->user_ip6[3];
+
+    if (!is_ipv6_local_probe(ip0, ip1, ip2, ip3))
+        return 1;
+
+    return hideport_maybe_rewrite_bind(ctx);
+}
+
+static __always_inline int record_bind_attempt(__s32 fd,
+                                               const void *uaddr,
+                                               int addrlen)
+{
+    __u64 key = bpf_get_current_pid_tgid();
+    struct bind_attempt_state state = {};
     __u16 port = 0;
-    __u16 replacement_port = 0;
-    __u32 uid;
-    __u8 *match;
 
-    (void)ctx;
+    bpf_map_delete_elem(&pending_bind_attempts, &key);
 
-    if (!read_bind_port(uaddr, addrlen, &port))
+    if (fd < 0)
         return 0;
 
-    match = bpf_map_lookup_elem(&target_ports, &port);
-    if (!match)
+    if (!read_target_local_sockaddr(uaddr, addrlen, &port))
         return 0;
 
-    uid = (__u32)bpf_get_current_uid_gid();
-    match = bpf_map_lookup_elem(&allowed_uids, &uid);
-    if (match)
-        return 0;
-
-    /*
-     * This target kernel does not expose bpf_override_return(). Rewrite the
-     * requested port to 0 instead, so bind() succeeds on an ephemeral port.
-     */
-    bpf_probe_write_user((void *)((char *)uaddr + 2),
-                         &replacement_port,
-                         sizeof(replacement_port));
+    state.fd = fd;
+    state.port = port;
+    bpf_map_update_elem(&pending_bind_attempts, &key, &state, BPF_ANY);
     return 0;
 }
 
 SEC("kprobe/__sys_bind")
-int hideport_bind_direct(struct pt_regs *ctx)
+int hideport_bind_entry_direct(struct pt_regs *ctx)
 {
-    const void *uaddr = (const void *)PT_REGS_PARM2(ctx);
-    int addrlen = (int)PT_REGS_PARM3(ctx);
-
-    return hideport_maybe_rewrite(ctx, uaddr, addrlen);
+    return record_bind_attempt((__s32)PT_REGS_PARM1(ctx),
+                               (const void *)PT_REGS_PARM2(ctx),
+                               (int)PT_REGS_PARM3(ctx));
 }
 
 SEC("kprobe/__arm64_sys_bind")
-int hideport_bind_arm64_syscall(struct pt_regs *ctx)
+int hideport_bind_entry_arm64(struct pt_regs *ctx)
 {
     const struct pt_regs *syscall_regs = (const struct pt_regs *)PT_REGS_PARM1(ctx);
-    const void *uaddr = (const void *)BPF_CORE_READ(syscall_regs, regs[1]);
-    int addrlen = (int)BPF_CORE_READ(syscall_regs, regs[2]);
 
-    return hideport_maybe_rewrite(ctx, uaddr, addrlen);
+    return record_bind_attempt((__s32)BPF_CORE_READ(syscall_regs, regs[0]),
+                               (const void *)BPF_CORE_READ(syscall_regs, regs[1]),
+                               (int)BPF_CORE_READ(syscall_regs, regs[2]));
+}
+
+SEC("kretprobe/__sys_bind")
+int hideport_bind_ret(struct pt_regs *ctx)
+{
+    __u64 key = bpf_get_current_pid_tgid();
+    struct bind_attempt_state *state;
+
+    state = bpf_map_lookup_elem(&pending_bind_attempts, &key);
+    if (!state)
+        return 0;
+
+    if (PT_REGS_RC(ctx) == 0) {
+        struct fd_port_key fd_key = make_fd_key(state->fd);
+        __u16 port = state->port;
+
+        bpf_map_update_elem(&fd_bound_ports, &fd_key, &port, BPF_ANY);
+    }
+
+    bpf_map_delete_elem(&pending_bind_attempts, &key);
+    return 0;
+}
+
+static __always_inline int record_getsockname_user_addr(__s32 fd, __u64 uaddr)
+{
+    __u64 pending_key = bpf_get_current_pid_tgid();
+    struct fd_port_key fd_key = make_fd_key(fd);
+    __u16 *port = bpf_map_lookup_elem(&fd_bound_ports, &fd_key);
+    struct bind_rewrite_state state = {};
+
+    if (fd < 0 || !port || !uaddr)
+        return 0;
+
+    state.uaddr = uaddr;
+    state.port = *port;
+    bpf_map_update_elem(&pending_getsockname, &pending_key, &state, BPF_ANY);
+    return 0;
+}
+
+SEC("kprobe/__sys_getsockname")
+int hideport_getsockname_entry_direct(struct pt_regs *ctx)
+{
+    return record_getsockname_user_addr((__s32)PT_REGS_PARM1(ctx),
+                                        (__u64)PT_REGS_PARM2(ctx));
+}
+
+SEC("kprobe/__arm64_sys_getsockname")
+int hideport_getsockname_entry_arm64(struct pt_regs *ctx)
+{
+    const struct pt_regs *syscall_regs = (const struct pt_regs *)PT_REGS_PARM1(ctx);
+
+    return record_getsockname_user_addr((__s32)BPF_CORE_READ(syscall_regs, regs[0]),
+                                        BPF_CORE_READ(syscall_regs, regs[1]));
+}
+
+SEC("kretprobe/__sys_getsockname")
+int hideport_getsockname_ret(struct pt_regs *ctx)
+{
+    __u64 key = bpf_get_current_pid_tgid();
+    struct bind_rewrite_state *state;
+
+    state = bpf_map_lookup_elem(&pending_getsockname, &key);
+    if (!state)
+        return 0;
+
+    if (PT_REGS_RC(ctx) == 0) {
+        __u64 port_addr = state->uaddr + 2;
+        __u16 port = state->port;
+
+        bpf_probe_write_user((void *)port_addr, &port, sizeof(port));
+    }
+
+    bpf_map_delete_elem(&pending_getsockname, &key);
+    return 0;
+}
+
+static __always_inline int forget_fd(__s32 fd)
+{
+    struct fd_port_key key;
+
+    if (fd < 0)
+        return 0;
+
+    key = make_fd_key(fd);
+    bpf_map_delete_elem(&fd_bound_ports, &key);
+    return 0;
+}
+
+SEC("kprobe/__sys_close")
+int hideport_close_entry_direct(struct pt_regs *ctx)
+{
+    return forget_fd((__s32)PT_REGS_PARM1(ctx));
+}
+
+SEC("kprobe/__arm64_sys_close")
+int hideport_close_entry_arm64(struct pt_regs *ctx)
+{
+    const struct pt_regs *syscall_regs = (const struct pt_regs *)PT_REGS_PARM1(ctx);
+
+    return forget_fd((__s32)BPF_CORE_READ(syscall_regs, regs[0]));
 }

@@ -2,6 +2,16 @@
 
 SKIPUNZIP=0
 
+# ── abort fallback (in case the installer framework hasn't defined it) ──
+if ! command -v abort >/dev/null 2>&1; then
+    abort() {
+        ui_print "$1" 2>/dev/null || echo "$1"
+        [ -d "$MODPATH" ] && rm -rf "$MODPATH"
+        exit 1
+    }
+fi
+
+# ── SHA-256 helper ──
 calc_sha256() {
     local file="$1"
     local line
@@ -19,57 +29,52 @@ calc_sha256() {
     echo "${line%% *}"
 }
 
-check_kernel_btf() {
-    local expected_file="$MODPATH/kernel_btf.sha256"
-    local tmp_expected="${TMPDIR:-/dev}/hideSceneport_kernel_btf.sha256"
-    local current_btf="/sys/kernel/btf/vmlinux"
-    local expected
-    local actual
+# ── Kernel BTF fingerprint verification (top-level, always runs) ──
+ui_print "- Installing Scene Port Hider by eBPF"
 
-    if [ ! -f "$expected_file" ] && [ -n "$ZIPFILE" ] && command -v unzip >/dev/null 2>&1; then
-        if unzip -p "$ZIPFILE" kernel_btf.sha256 > "$tmp_expected" 2>/dev/null; then
-            expected_file="$tmp_expected"
-        fi
+expected_file="$MODPATH/kernel_btf.sha256"
+tmp_expected="${TMPDIR:-/dev}/hideSceneport_kernel_btf.sha256"
+current_btf="/sys/kernel/btf/vmlinux"
+
+# Try extracting from the zip if the file wasn't unpacked to MODPATH
+if [ ! -f "$expected_file" ] && [ -n "$ZIPFILE" ] && command -v unzip >/dev/null 2>&1; then
+    if unzip -p "$ZIPFILE" kernel_btf.sha256 > "$tmp_expected" 2>/dev/null && [ -s "$tmp_expected" ]; then
+        expected_file="$tmp_expected"
     fi
+fi
 
-    if [ ! -f "$expected_file" ]; then
-        ui_print "- No kernel BTF fingerprint found; skip anti-misflash check"
-        return 0
-    fi
+if [ ! -f "$expected_file" ]; then
+    abort "! No kernel BTF fingerprint (kernel_btf.sha256) found in module package. Rebuild the module with your device's BTF."
+fi
 
-    read -r expected < "$expected_file"
-    if [ -z "$expected" ]; then
-        abort "! Empty kernel BTF fingerprint in module package"
-    fi
+read -r expected < "$expected_file"
+if [ -z "$expected" ]; then
+    abort "! Empty kernel BTF fingerprint in module package"
+fi
 
-    if [ ! -r "$current_btf" ]; then
-        abort "! Cannot read $current_btf on this device"
-    fi
+if [ ! -r "$current_btf" ]; then
+    abort "! Cannot read $current_btf on this device"
+fi
 
-    actual="$(calc_sha256 "$current_btf")" || abort "! Failed to calculate current kernel BTF fingerprint"
+actual="$(calc_sha256 "$current_btf")" || abort "! Failed to calculate current kernel BTF fingerprint"
 
-    ui_print "- Expected kernel BTF: $expected"
-    ui_print "- Current  kernel BTF: $actual"
+ui_print "- Expected kernel BTF: $expected"
+ui_print "- Current  kernel BTF: $actual"
 
-    if [ "$expected" != "$actual" ]; then
-        abort "! Kernel BTF mismatch. This module was built for another kernel/device."
-    fi
+if [ "$expected" != "$actual" ]; then
+    abort "! Kernel BTF mismatch. This module was built for another kernel/device."
+fi
 
-    ui_print "- Kernel BTF matched"
-}
+ui_print "- Kernel BTF matched"
+ui_print "- Edit hideport.conf if your package or ports differ"
 
-on_install() {
-    ui_print "- Installing Scene Port Hider by eBPF"
-    check_kernel_btf
-    ui_print "- Edit hideport.conf if your package or ports differ"
-}
+rm -rf "$MODPATH/service.d" "$MODPATH/hide_scene_port.sh"
 
+# ── Permissions ──
 set_permissions() {
     set_perm_recursive "$MODPATH" 0 0 0755 0644
     set_perm "$MODPATH/post-fs-data.sh" 0 0 0755
     set_perm "$MODPATH/service.sh" 0 0 0755
     set_perm "$MODPATH/hideport_start.sh" 0 0 0755
-    set_perm "$MODPATH/hide_scene_port.sh" 0 0 0755
-    set_perm "$MODPATH/service.d/hide_scene_port.sh" 0 0 0755
     set_perm "$MODPATH/system/bin/hideport_loader" 0 0 0755
 }

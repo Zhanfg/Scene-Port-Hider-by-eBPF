@@ -9,6 +9,7 @@ NDK_URL="${NDK_URL:-https://dl.google.com/android/repository/android-ndk-r25c-li
 DEPS_DIR="${DEPS_DIR:-$HOME/hideport-deps}"
 PREFIX="${PREFIX:-$DEPS_DIR/android-arm64}"
 BPFTOOL="${BPFTOOL:-}"
+REMOTE_BTF="/storage/emulated/0/Download/vmlinux.btf"
 
 need_cmd() {
     command -v "$1" >/dev/null 2>&1 || return 1
@@ -59,9 +60,9 @@ fi
 echo "==> Pulling target kernel BTF from connected device"
 adb wait-for-device
 adb shell su -c 'test -r /sys/kernel/btf/vmlinux'
-adb shell su -c 'cp /sys/kernel/btf/vmlinux /data/local/tmp/vmlinux.btf && chmod 0644 /data/local/tmp/vmlinux.btf'
-adb pull /data/local/tmp/vmlinux.btf "$ROOT/vmlinux.btf" >/dev/null
-adb shell su -c 'rm -f /data/local/tmp/vmlinux.btf'
+adb shell su -c "cp /sys/kernel/btf/vmlinux '$REMOTE_BTF' && chmod 0644 '$REMOTE_BTF'"
+adb pull "$REMOTE_BTF" "$ROOT/vmlinux.btf" >/dev/null
+adb shell su -c "rm -f '$REMOTE_BTF'"
 
 btf_magic="$(xxd -p -l 4 "$ROOT/vmlinux.btf")"
 if [[ "$btf_magic" != "9feb0100" ]]; then
@@ -98,5 +99,4 @@ Done:
 Install this zip in KernelSU Manager, then reboot.
 Logs on device:
   /data/adb/modules/hideSceneport/hideport.log
-  /data/adb/modules/hideSceneport/hide_scene.log
 EOF

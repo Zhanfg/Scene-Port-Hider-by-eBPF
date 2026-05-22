@@ -1,4 +1,3 @@
 #!/system/bin/sh
-MODDIR=${0%/*}
-
-sh "$MODDIR/hideport_start.sh" post-fs-data >/dev/null 2>&1 &
+# Wait for Android services before resolving app UIDs.
+# service.sh starts the loader once package manager data is available.

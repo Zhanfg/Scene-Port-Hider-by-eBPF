@@ -41,9 +41,9 @@ User flow:
 git clone https://github.com/USER/hideport_module.git
 cd hideport_module
 mkdir -p btf
-adb shell su -c 'cp /sys/kernel/btf/vmlinux /data/local/tmp/vmlinux.btf && chmod 0644 /data/local/tmp/vmlinux.btf'
-adb pull /data/local/tmp/vmlinux.btf ./btf/vmlinux.btf
-adb shell su -c 'rm -f /data/local/tmp/vmlinux.btf'
+adb shell su -c 'cp /sys/kernel/btf/vmlinux /storage/emulated/0/Download/vmlinux.btf && chmod 0644 /storage/emulated/0/Download/vmlinux.btf'
+adb pull /storage/emulated/0/Download/vmlinux.btf ./btf/vmlinux.btf
+adb shell su -c 'rm -f /storage/emulated/0/Download/vmlinux.btf'
 git add btf/vmlinux.btf
 git commit -m "Add target kernel BTF"
 git push

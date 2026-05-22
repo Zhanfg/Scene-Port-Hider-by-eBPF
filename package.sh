@@ -43,10 +43,8 @@ fi
         post-fs-data.sh
         service.sh
         hideport_start.sh
-        hide_scene_port.sh
         customize.sh
         uninstall.sh
-        service.d
         system
     )
     if [[ -f kernel_btf.sha256 ]]; then

@@ -12,7 +12,7 @@ on:
         description: "Release tag to create when create_release is true"
         required: false
         type: string
-        default: "v1.0-op5d0dl1"
+        default: "v2.0.1"
   push:
     tags:
       - "v*"
@@ -64,7 +64,7 @@ jobs:
       - name: Upload module zip
         uses: actions/upload-artifact@v4
         with:
-          name: hideSceneport_module
+          name: ScenePortHider_Release
           path: hideSceneport_module.zip
           if-no-files-found: error
 
