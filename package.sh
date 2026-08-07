@@ -70,5 +70,10 @@ fi
 )
 
 [[ -s "$ZIP" ]] || fail "Package was not created: $ZIP"
-sha256sum "$ZIP" > "$ZIP.sha256"
+zip_dir="$(cd "$(dirname "$ZIP")" && pwd)"
+zip_name="$(basename "$ZIP")"
+(
+    cd "$zip_dir"
+    sha256sum "$zip_name" > "$zip_name.sha256"
+)
 echo "Wrote $ZIP and $ZIP.sha256"
