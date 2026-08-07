@@ -1,5 +1,7 @@
 #!/system/bin/sh
 
+# Read by the KernelSU/Magisk installer framework before running this script.
+# shellcheck disable=SC2034
 SKIPUNZIP=0
 
 # ── abort fallback (in case the installer framework hasn't defined it) ──
@@ -29,28 +31,67 @@ calc_sha256() {
     echo "${line%% *}"
 }
 
-# ── Kernel BTF fingerprint verification (top-level, always runs) ──
+extract_package_file() {
+    local archive_path="$1"
+    local destination="$2"
+
+    [ -n "$ZIPFILE" ] || return 1
+    command -v unzip >/dev/null 2>&1 || return 1
+    unzip -p "$ZIPFILE" "$archive_path" > "$destination" 2>/dev/null
+    [ -s "$destination" ]
+}
+
+manifest_value() {
+    local manifest="$1"
+    local key="$2"
+    sed -n "s/^${key}=//p" "$manifest" | head -n 1
+}
+
 ui_print "- Installing Scene Port Hider by eBPF"
 
 expected_file="$MODPATH/kernel_btf.sha256"
+manifest_file="$MODPATH/build-manifest.txt"
+loader_file="$MODPATH/system/bin/hideport_loader"
 tmp_expected="${TMPDIR:-/dev}/hideSceneport_kernel_btf.sha256"
+tmp_manifest="${TMPDIR:-/dev}/hideSceneport_build_manifest.txt"
 current_btf="/sys/kernel/btf/vmlinux"
 
-# Try extracting from the zip if the file wasn't unpacked to MODPATH
-if [ ! -f "$expected_file" ] && [ -n "$ZIPFILE" ] && command -v unzip >/dev/null 2>&1; then
-    if unzip -p "$ZIPFILE" kernel_btf.sha256 > "$tmp_expected" 2>/dev/null && [ -s "$tmp_expected" ]; then
-        expected_file="$tmp_expected"
-    fi
+# Try extracting required metadata from the ZIP when the installer framework
+# has not yet unpacked it to MODPATH.
+if [ ! -f "$expected_file" ] && extract_package_file kernel_btf.sha256 "$tmp_expected"; then
+    expected_file="$tmp_expected"
+fi
+if [ ! -f "$manifest_file" ] && extract_package_file build-manifest.txt "$tmp_manifest"; then
+    manifest_file="$tmp_manifest"
 fi
 
 if [ ! -f "$expected_file" ]; then
-    abort "! No kernel BTF fingerprint (kernel_btf.sha256) found in module package. Rebuild the module with your device's BTF."
+    abort "! No kernel BTF fingerprint found. Rebuild with the target kernel BTF."
+fi
+if [ ! -f "$manifest_file" ]; then
+    abort "! No build-manifest.txt found in module package"
+fi
+if [ ! -s "$loader_file" ]; then
+    abort "! Missing hideport_loader in module package"
 fi
 
 read -r expected < "$expected_file"
-if [ -z "$expected" ]; then
-    abort "! Empty kernel BTF fingerprint in module package"
+case "$expected" in
+    ''|*[!0-9a-f]*) abort "! Invalid kernel BTF fingerprint in module package" ;;
+esac
+[ "${#expected}" -eq 64 ] || abort "! Invalid kernel BTF fingerprint length"
+
+expected_loader="$(manifest_value "$manifest_file" loader_sha256)"
+case "$expected_loader" in
+    ''|*[!0-9a-f]*) abort "! Invalid loader SHA-256 in build manifest" ;;
+esac
+[ "${#expected_loader}" -eq 64 ] || abort "! Invalid loader SHA-256 length"
+
+actual_loader="$(calc_sha256 "$loader_file")" || abort "! Failed to calculate loader SHA-256"
+if [ "$expected_loader" != "$actual_loader" ]; then
+    abort "! hideport_loader does not match build-manifest.txt"
 fi
+ui_print "- Loader integrity matched build manifest"
 
 if [ ! -r "$current_btf" ]; then
     abort "! Cannot read $current_btf on this device"
