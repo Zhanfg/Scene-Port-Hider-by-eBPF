@@ -118,12 +118,11 @@ if [[ ! -f "$PREFIX/lib/libelf.a" ]]; then
         ./configure \
             --host=aarch64-linux-android \
             --prefix="$PREFIX" \
+            --enable-maintainer-mode \
             --disable-debuginfod \
             --disable-libdebuginfod \
             --disable-debuginfod-urls \
             --disable-nls \
-            --disable-shared \
-            --enable-static \
             --without-bzlib \
             --without-lzma \
             --without-zstd
