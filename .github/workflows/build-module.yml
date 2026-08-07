@@ -53,6 +53,7 @@ jobs:
           shellcheck \
             build_deps_android.sh \
             tools/build_from_btf.sh \
+            build.sh \
             package.sh
 
       - name: ShellCheck Android runtime scripts
@@ -101,8 +102,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            autoconf automake bzip2 clang curl gettext git libtool lld \
-            make pkg-config unzip xxd xz-utils zip
+            autoconf automake binutils bzip2 clang curl file gettext git \
+            libtool lld make pkg-config unzip xxd xz-utils zip
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
@@ -141,6 +142,17 @@ jobs:
 
       - name: Build module from committed BTF
         run: bash tools/build_from_btf.sh
+
+      - name: Verify native build outputs
+        run: |
+          readelf -h system/bin/hideport.bpf.o | grep -Eq 'Machine:[[:space:]]+Linux BPF'
+          readelf -h system/bin/hideport_loader | grep -Eq 'Class:[[:space:]]+ELF64'
+          readelf -h system/bin/hideport_loader | grep -Eq 'Machine:[[:space:]]+AArch64'
+          if readelf -d system/bin/hideport_loader | grep -q '(NEEDED)'; then
+            echo "hideport_loader unexpectedly contains dynamic dependencies" >&2
+            exit 1
+          fi
+          file system/bin/hideport_loader
 
       - name: Stage and verify module artifact
         run: |
