@@ -27,7 +27,8 @@ printf '%s\0%s\0' "$loader" '--port' > "$proc_root/$sleeper/cmdline"
 
 PROC_ROOT="$proc_root"
 export PROC_ROOT
-# shellcheck source=../module_process.sh
+# The absolute path is computed from this checkout at runtime.
+# shellcheck disable=SC1091
 . "$repo_root/module_process.sh"
 
 process_matches_loader "$sleeper" "$loader"
