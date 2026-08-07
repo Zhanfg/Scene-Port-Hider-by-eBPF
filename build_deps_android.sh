@@ -68,6 +68,12 @@ checkout_exact_commit() {
 
     actual="$(git -C "$destination" rev-parse HEAD)"
     [[ "${actual,,}" == "${commit,,}" ]] || fail "$destination checkout mismatch"
+
+    # Cached source directories may contain generated or locally modified
+    # files from a previous partial build. Reset before every reuse so the
+    # declared commit is also the actual working-tree input.
+    git -C "$destination" reset -q --hard "$commit"
+    git -C "$destination" clean -q -ffdx
 }
 
 if [[ ! -f "$PREFIX/include/libintl.h" ]]; then
@@ -92,7 +98,6 @@ if [[ ! -f "$PREFIX/lib/libz.a" ]]; then
     checkout_exact_commit zlib https://github.com/madler/zlib.git "$ZLIB_COMMIT"
     (
         cd zlib
-        make distclean >/dev/null 2>&1 || true
         CHOST=aarch64-linux-android ./configure --static --prefix="$PREFIX"
         make -j"$JOBS"
         make install
