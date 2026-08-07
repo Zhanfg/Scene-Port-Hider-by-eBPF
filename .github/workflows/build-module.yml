@@ -48,16 +48,25 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y shellcheck zip unzip xxd
 
-      - name: ShellCheck changed runtime and build scripts
+      - name: ShellCheck build scripts
         run: |
           shellcheck \
             build_deps_android.sh \
             tools/build_from_btf.sh \
-            package.sh \
+            package.sh
+
+      - name: ShellCheck Android runtime scripts
+        run: |
+          # Android /system/bin/sh supports local variables, while ShellCheck's
+          # generic POSIX mode reports SC3043. Dynamic module paths and ps
+          # USER,ARGS parsing are intentional and scoped to these files.
+          shellcheck -s dash -e SC3043,SC1090,SC2009 \
             module_process.sh \
             hideport_start.sh \
-            uninstall.sh \
-            tests/test_module_safety.sh
+            uninstall.sh
+
+      - name: ShellCheck tests
+        run: shellcheck -x tests/test_module_safety.sh
 
       - name: Run module safety tests
         run: bash tests/test_module_safety.sh
@@ -93,7 +102,7 @@ jobs:
 
       - name: Install pinned Android NDK
         run: |
-          yes | sdkmanager --licenses >/dev/null
+          yes | sdkmanager --licenses >/dev/null || true
           sdkmanager "ndk;${ANDROID_NDK_VERSION}"
           ndk_path="$ANDROID_SDK_ROOT/ndk/$ANDROID_NDK_VERSION"
           test -x "$ndk_path/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android${ANDROID_API}-clang"
