@@ -38,8 +38,19 @@ pidfile="$tmp_root/loader.pid"
 write_pidfile_atomic "$pidfile" "$sleeper"
 [[ "$(read_verified_pidfile "$pidfile" "$loader")" = "$sleeper" ]]
 
+# A readable but different executable must be rejected even when cmdline
+# contains the loader path as an unrelated argument.
 rm -f "$proc_root/$sleeper/exe"
 ln -s "$tmp_root/unrelated" "$proc_root/$sleeper/exe"
+printf '%s\0%s\0' "$tmp_root/unrelated" "$loader" > "$proc_root/$sleeper/cmdline"
+assert_fails read_verified_pidfile "$pidfile" "$loader"
+
+# If /proc/<pid>/exe is unavailable, cmdline remains a compatibility fallback.
+rm -f "$proc_root/$sleeper/exe"
+printf '%s\0%s\0' "$loader" '--port' > "$proc_root/$sleeper/cmdline"
+[[ "$(read_verified_pidfile "$pidfile" "$loader")" = "$sleeper" ]]
+
+# An unavailable exe plus unrelated cmdline must still fail.
 printf '%s\0' "$tmp_root/unrelated" > "$proc_root/$sleeper/cmdline"
 assert_fails read_verified_pidfile "$pidfile" "$loader"
 
