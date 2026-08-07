@@ -81,6 +81,10 @@ EOF_INPUTS
 bash "$fixture/package.sh" "$tmp_root/with-btf.zip"
 [[ -s "$tmp_root/with-btf.zip" ]]
 [[ -s "$tmp_root/with-btf.zip.sha256" ]]
+(
+    cd "$tmp_root"
+    sha256sum -c with-btf.zip.sha256 >/dev/null
+)
 unzip -t "$tmp_root/with-btf.zip" >/dev/null
 for required in kernel_btf.sha256 build-manifest.txt module_process.sh system/bin/hideport_loader; do
     unzip -Z1 "$tmp_root/with-btf.zip" | grep -Fqx "$required"
