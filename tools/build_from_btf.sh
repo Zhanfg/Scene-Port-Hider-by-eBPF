@@ -3,34 +3,34 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ANDROID_API="${ANDROID_API:-26}"
-ANDROID_NDK="${ANDROID_NDK:-$HOME/android-ndk-r25c}"
-NDK_ZIP="${NDK_ZIP:-$HOME/android-ndk-r25c-linux.zip}"
-NDK_URL="${NDK_URL:-https://dl.google.com/android/repository/android-ndk-r25c-linux.zip}"
+ANDROID_NDK="${ANDROID_NDK:-${ANDROID_NDK_HOME:-}}"
 DEPS_DIR="${DEPS_DIR:-$HOME/hideport-deps}"
 PREFIX="${PREFIX:-$DEPS_DIR/android-arm64}"
 BPFTOOL="${BPFTOOL:-}"
 
+fail() {
+    echo "[ERROR] $*" >&2
+    exit 1
+}
+
 need_cmd() {
-    command -v "$1" >/dev/null 2>&1 || return 1
+    command -v "$1" >/dev/null 2>&1
 }
 
 if [[ -z "$BPFTOOL" ]]; then
     if [[ -x /usr/local/sbin/bpftool ]]; then
         BPFTOOL=/usr/local/sbin/bpftool
     elif need_cmd bpftool; then
-        BPFTOOL=bpftool
+        BPFTOOL="$(command -v bpftool)"
     else
-        echo "Missing bpftool. Install it or set BPFTOOL=/path/to/bpftool." >&2
-        exit 1
+        fail "Missing bpftool; set BPFTOOL=/path/to/bpftool"
     fi
 fi
+[[ -x "$BPFTOOL" ]] || fail "bpftool is not executable: $BPFTOOL"
 
-if [[ ! -x "$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android${ANDROID_API}-clang" ]]; then
-    echo "Android NDK not found at $ANDROID_NDK"
-    echo "Downloading $NDK_URL"
-    curl -fL --retry 3 "$NDK_URL" -o "$NDK_ZIP"
-    unzip -q "$NDK_ZIP" -d "$HOME"
-fi
+[[ -n "$ANDROID_NDK" ]] || fail "Set ANDROID_NDK or ANDROID_NDK_HOME to a preinstalled NDK"
+ndk_clang="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android${ANDROID_API}-clang"
+[[ -x "$ndk_clang" ]] || fail "Android NDK clang is missing: $ndk_clang"
 
 btf_file=""
 for candidate in "$ROOT/btf/vmlinux.btf" "$ROOT/vmlinux.btf"; do
@@ -43,50 +43,33 @@ done
 if [[ -n "$btf_file" ]]; then
     btf_magic="$(xxd -p -l 4 "$btf_file")"
     if [[ "$btf_magic" != "9feb0100" ]]; then
-        echo "Unexpected BTF magic in $btf_file: $btf_magic" >&2
-        echo "Expected 9feb0100. The file may have been copied as text." >&2
-        exit 1
+        fail "Unexpected BTF magic in $btf_file: $btf_magic; expected 9feb0100"
     fi
 
     echo "==> Generating src/vmlinux.h from $btf_file"
-    "$BPFTOOL" btf dump file "$btf_file" format c > "$ROOT/src/vmlinux.h"
+    tmp_header="$ROOT/src/vmlinux.h.tmp"
+    rm -f "$tmp_header"
+    "$BPFTOOL" btf dump file "$btf_file" format c > "$tmp_header"
+    [[ -s "$tmp_header" ]] || fail "bpftool produced an empty vmlinux.h"
+    mv "$tmp_header" "$ROOT/src/vmlinux.h"
 elif [[ -f "$ROOT/src/vmlinux.h" ]]; then
     echo "==> Using existing src/vmlinux.h"
 else
-    cat >&2 <<EOF
-Missing target kernel BTF.
-
-Provide one of:
-  btf/vmlinux.btf
-  vmlinux.btf
-  src/vmlinux.h
-
-Recommended for GitHub Actions:
-  1. Pull BTF locally:
-       adb shell su -c 'cp /sys/kernel/btf/vmlinux /storage/emulated/0/Download/vmlinux.btf && chmod 0644 /storage/emulated/0/Download/vmlinux.btf'
-       adb pull /storage/emulated/0/Download/vmlinux.btf ./btf/vmlinux.btf
-       adb shell su -c 'rm -f /storage/emulated/0/Download/vmlinux.btf'
-  2. Commit btf/vmlinux.btf to your fork.
-  3. Run the build workflow.
-EOF
-    exit 1
+    fail "Missing target kernel BTF or src/vmlinux.h"
 fi
 
 echo "==> Building Android arm64 dependencies"
-export ANDROID_NDK
-export ANDROID_API
-export DEPS_DIR
-export PREFIX
+export ANDROID_NDK ANDROID_API DEPS_DIR PREFIX
 bash "$ROOT/build_deps_android.sh"
 
-echo "==> Building hideport module binaries"
+echo "==> Building module binaries"
 export LIBBPF_SRC="$PREFIX"
 export LIBBPF_HEADERS="$PREFIX/include"
 export LIBBPF_LIBDIR="$PREFIX/lib"
 export BPFTOOL
 bash "$ROOT/build.sh"
 
-echo "==> Packaging KernelSU module"
+echo "==> Packaging module"
 bash "$ROOT/package.sh"
 
 echo "Built $ROOT/../hideSceneport_module.zip"
