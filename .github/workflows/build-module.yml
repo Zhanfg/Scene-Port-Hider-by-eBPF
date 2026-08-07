@@ -63,6 +63,7 @@ jobs:
           shellcheck -s dash -e SC3043,SC1090,SC2009 \
             module_process.sh \
             hideport_start.sh \
+            customize.sh \
             uninstall.sh
 
       - name: ShellCheck tests
