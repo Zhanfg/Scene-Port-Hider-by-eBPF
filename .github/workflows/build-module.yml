@@ -1,6 +1,7 @@
 name: Build KernelSU module
 
 on:
+  pull_request:
   workflow_dispatch:
     inputs:
       create_release:
@@ -9,75 +10,173 @@ on:
         type: boolean
         default: false
       release_tag:
-        description: "Release tag to create when create_release is true"
+        description: "Release tag when create_release is true"
         required: false
         type: string
-        default: "v2.0.1"
+        default: "v2.0.3"
   push:
     tags:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: scene-port-hider-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ANDROID_NDK_VERSION: "25.2.9519653"
+  ANDROID_API: "26"
+  BPFTOOL_VERSION: "v7.7.0"
+  BPFTOOL_SHA256: "09150596f09356b0ff632dd7f9856e0ea86bf96b269e9bc94278d9a9432a268c"
+  ZLIB_COMMIT: "51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf"
+  ELFUTILS_COMMIT: "18a015c0b0787ba5acb39801ab7c17dac50f584d"
+  LIBBPF_COMMIT: "f7081a6baf3f54949aacb8c2fc11bb30783b83e9"
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-
+  validate:
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Install validation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck zip unzip xxd
+
+      - name: ShellCheck changed runtime and build scripts
+        run: |
+          shellcheck \
+            build_deps_android.sh \
+            tools/build_from_btf.sh \
+            package.sh \
+            module_process.sh \
+            hideport_start.sh \
+            uninstall.sh \
+            tests/test_module_safety.sh
+
+      - name: Run module safety tests
+        run: bash tests/test_module_safety.sh
+
+      - name: Validate manual release tag
+        if: github.event_name == 'workflow_dispatch' && inputs.create_release
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]
+
+  build:
+    if: github.event_name != 'pull_request'
+    needs: validate
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
 
       - name: Install host tools
         run: |
-          sudo apt update
-          sudo apt install -y curl unzip make git clang llvm lld tar xxd zip pkg-config autoconf automake libtool bzip2 xz-utils
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf automake bzip2 clang curl gettext git libtool lld \
+            make pkg-config unzip xxd xz-utils zip
 
-      - name: Install bpftool
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+
+      - name: Install pinned Android NDK
         run: |
-          BPFTOOL_VERSION="v7.7.0"
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "ndk;${ANDROID_NDK_VERSION}"
+          ndk_path="$ANDROID_SDK_ROOT/ndk/$ANDROID_NDK_VERSION"
+          test -x "$ndk_path/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android${ANDROID_API}-clang"
+          echo "ANDROID_NDK=$ndk_path" >> "$GITHUB_ENV"
+
+      - name: Install verified bpftool
+        run: |
+          archive="$RUNNER_TEMP/bpftool.tar.gz"
           curl -fL --retry 3 \
             "https://github.com/libbpf/bpftool/releases/download/${BPFTOOL_VERSION}/bpftool-${BPFTOOL_VERSION}-amd64.tar.gz" \
-            -o "$RUNNER_TEMP/bpftool.tar.gz"
+            -o "$archive"
+          echo "$BPFTOOL_SHA256  $archive" | sha256sum -c -
           mkdir -p "$RUNNER_TEMP/bpftool"
-          tar -xzf "$RUNNER_TEMP/bpftool.tar.gz" -C "$RUNNER_TEMP/bpftool"
-          BPFTOOL_PATH="$(find "$RUNNER_TEMP/bpftool" -type f -name bpftool | head -n 1)"
-          chmod +x "$BPFTOOL_PATH"
-          echo "BPFTOOL=$BPFTOOL_PATH" >> "$GITHUB_ENV"
-          "$BPFTOOL_PATH" version
+          tar --no-same-owner --no-same-permissions -xzf "$archive" -C "$RUNNER_TEMP/bpftool"
+          bpftool_path="$(find "$RUNNER_TEMP/bpftool" -type f -name bpftool -print -quit)"
+          test -n "$bpftool_path"
+          chmod +x "$bpftool_path"
+          echo "BPFTOOL=$bpftool_path" >> "$GITHUB_ENV"
+          "$bpftool_path" version
 
-      - name: Cache Android arm64 dependencies
-        uses: actions/cache@v4
+      - name: Cache pinned Android arm64 dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/hideport-deps
-          key: hideport-deps-r25c-${{ runner.os }}-${{ hashFiles('build_deps_android.sh') }}
+          key: >-
+            hideport-deps-${{ runner.os }}-ndk-${{ env.ANDROID_NDK_VERSION }}-
+            zlib-${{ env.ZLIB_COMMIT }}-elfutils-${{ env.ELFUTILS_COMMIT }}-
+            libbpf-${{ env.LIBBPF_COMMIT }}-${{ hashFiles('build_deps_android.sh') }}
 
-      - name: Build module from BTF
-        run: |
-          bash tools/build_from_btf.sh
+      - name: Build module from committed BTF
+        run: bash tools/build_from_btf.sh
 
-      - name: Stage module zip
+      - name: Stage and verify module artifact
         run: |
           cp ../hideSceneport_module.zip ./hideSceneport_module.zip
-          ls -lh ./hideSceneport_module.zip
+          cp ../hideSceneport_module.zip.sha256 ./hideSceneport_module.zip.sha256
+          sha256sum -c hideSceneport_module.zip.sha256
+          unzip -t hideSceneport_module.zip >/dev/null
+          unzip -Z1 hideSceneport_module.zip | grep -Fqx build-manifest.txt
 
-      - name: Upload module zip
-        uses: actions/upload-artifact@v4
+      - name: Upload module artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ScenePortHider_Release
-          path: hideSceneport_module.zip
+          path: |
+            hideSceneport_module.zip
+            hideSceneport_module.zip.sha256
           if-no-files-found: error
+          retention-days: 14
+
+  release:
+    if: >-
+      startsWith(github.ref, 'refs/tags/') ||
+      (github.event_name == 'workflow_dispatch' && inputs.create_release && github.ref == 'refs/heads/main')
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+    steps:
+      - name: Download verified build artifact
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: ScenePortHider_Release
+          path: release-artifact
+
+      - name: Verify release files
+        working-directory: release-artifact
+        run: |
+          sha256sum -c hideSceneport_module.zip.sha256
+          unzip -t hideSceneport_module.zip >/dev/null
 
       - name: Create GitHub Release
-        if: ${{ startsWith(github.ref, 'refs/tags/') || inputs.create_release }}
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+          tag_name: ${{ env.RELEASE_TAG }}
           target_commitish: ${{ github.sha }}
-          name: Scene Port Hider by eBPF ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+          name: Scene Port Hider by eBPF ${{ env.RELEASE_TAG }}
           body: |
-            KernelSU module built by GitHub Actions.
+            Kernel module built from pinned dependencies and the BTF committed at this source revision.
 
-            This package is tied to the target kernel BTF committed in this repository.
-            For other devices or kernels, fork the repository and rebuild with that device's BTF.
-          files: hideSceneport_module.zip
+            Verify `hideSceneport_module.zip.sha256` before installation. The package is kernel-specific and must not be installed on a device whose BTF fingerprint differs.
+          files: |
+            release-artifact/hideSceneport_module.zip
+            release-artifact/hideSceneport_module.zip.sha256
