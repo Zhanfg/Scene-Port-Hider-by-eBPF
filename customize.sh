@@ -1,5 +1,7 @@
 #!/system/bin/sh
 
+# Read by the KernelSU/Magisk installer framework before running this script.
+# shellcheck disable=SC2034
 SKIPUNZIP=0
 
 # ── abort fallback (in case the installer framework hasn't defined it) ──
