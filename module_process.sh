@@ -19,10 +19,13 @@ process_matches_loader() {
     kill -0 "$pid" 2>/dev/null || return 1
 
     exe="$(readlink "$PROC_ROOT/$pid/exe" 2>/dev/null)"
-    if [ -n "$exe" ] && [ "$exe" = "$loader" ]; then
-        return 0
+    if [ -n "$exe" ]; then
+        [ "$exe" = "$loader" ]
+        return $?
     fi
 
+    # Some Android kernels restrict /proc/<pid>/exe. Only then use cmdline as
+    # a compatibility fallback; an explicit executable mismatch is rejected.
     if [ -r "$PROC_ROOT/$pid/cmdline" ]; then
         cmdline="$(tr '\000' ' ' < "$PROC_ROOT/$pid/cmdline" 2>/dev/null)"
         case " $cmdline " in
