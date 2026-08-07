@@ -84,7 +84,9 @@ jobs:
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]
 
   build:
-    if: github.event_name != 'pull_request'
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     needs: validate
     runs-on: ubuntu-22.04
     timeout-minutes: 90
