@@ -4,13 +4,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ZIP="${1:-$ROOT/../hideSceneport_module.zip}"
 
-if [[ ! -f "$ROOT/system/bin/hideport_loader" ]]; then
-    echo "Missing executable: $ROOT/system/bin/hideport_loader" >&2
-    echo "Run ./build.sh first." >&2
+fail() {
+    echo "[ERROR] $*" >&2
     exit 1
-fi
+}
 
-fingerprint="$ROOT/kernel_btf.sha256"
+loader="$ROOT/system/bin/hideport_loader"
+[[ -s "$loader" ]] || fail "Missing executable: $loader; run ./build.sh first"
+
 btf_source=""
 for candidate in "$ROOT/btf/vmlinux.btf" "$ROOT/vmlinux.btf"; do
     if [[ -f "$candidate" ]]; then
@@ -18,15 +19,33 @@ for candidate in "$ROOT/btf/vmlinux.btf" "$ROOT/vmlinux.btf"; do
         break
     fi
 done
+[[ -n "$btf_source" ]] || fail "No target vmlinux.btf found; refusing to create an uninstallable package"
 
-if [[ -n "$btf_source" ]]; then
-    sha256sum "$btf_source" | awk '{print $1}' > "$fingerprint"
-    echo "Wrote kernel BTF fingerprint from $btf_source"
-elif [[ -f "$fingerprint" ]]; then
-    rm -f "$fingerprint"
-    echo "Removed stale kernel BTF fingerprint"
-else
-    echo "Warning: no vmlinux.btf found; package will not enforce kernel BTF match." >&2
+btf_magic="$(xxd -p -l 4 "$btf_source")"
+[[ "$btf_magic" == "9feb0100" ]] || fail "Invalid BTF magic in $btf_source"
+
+btf_sha="$(sha256sum "$btf_source" | awk '{print $1}')"
+[[ "$btf_sha" =~ ^[0-9a-f]{64}$ ]] || fail "Failed to calculate BTF SHA-256"
+printf '%s\n' "$btf_sha" > "$ROOT/kernel_btf.sha256"
+
+loader_sha="$(sha256sum "$loader" | awk '{print $1}')"
+source_commit="unknown"
+if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    source_commit="$(git -C "$ROOT" rev-parse HEAD)"
+fi
+
+module_version="$(sed -n 's/^version=//p' "$ROOT/module.prop" | head -n 1)"
+cat > "$ROOT/build-manifest.txt" <<EOF_MANIFEST
+module_version=$module_version
+source_commit=$source_commit
+kernel_btf_sha256=$btf_sha
+loader_sha256=$loader_sha
+EOF_MANIFEST
+
+if [[ -f "$HOME/hideport-deps/android-arm64/build-inputs.txt" ]]; then
+    cat "$HOME/hideport-deps/android-arm64/build-inputs.txt" >> "$ROOT/build-manifest.txt"
+elif [[ -n "${PREFIX:-}" && -f "$PREFIX/build-inputs.txt" ]]; then
+    cat "$PREFIX/build-inputs.txt" >> "$ROOT/build-manifest.txt"
 fi
 
 (
@@ -39,14 +58,15 @@ fi
         hideport_start.sh
         customize.sh
         uninstall.sh
+        kernel_btf.sha256
+        build-manifest.txt
         system/bin/hideport_loader
     )
-    if [[ -f kernel_btf.sha256 ]]; then
-        files+=(kernel_btf.sha256)
-    fi
 
     rm -f "$ZIP"
-    zip -r "$ZIP" "${files[@]}" -x '*/.git/*'
+    zip -X -r "$ZIP" "${files[@]}" -x '*/.git/*'
 )
 
-echo "Wrote $ZIP"
+[[ -s "$ZIP" ]] || fail "Package was not created: $ZIP"
+sha256sum "$ZIP" > "$ZIP.sha256"
+echo "Wrote $ZIP and $ZIP.sha256"
