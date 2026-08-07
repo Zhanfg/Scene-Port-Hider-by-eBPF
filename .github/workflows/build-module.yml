@@ -105,14 +105,18 @@ jobs:
             autoconf automake binutils bzip2 clang curl file gettext git \
             libtool lld make pkg-config unzip xxd xz-utils zip
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
-
       - name: Install pinned Android NDK
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "ndk;${ANDROID_NDK_VERSION}"
-          ndk_path="$ANDROID_SDK_ROOT/ndk/$ANDROID_NDK_VERSION"
+          sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          sdkmanager_path="$(command -v sdkmanager || true)"
+          if [[ -z "$sdkmanager_path" ]]; then
+            sdkmanager_path="$sdk_root/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          test -x "$sdkmanager_path"
+          "$sdkmanager_path" --version
+          yes | "$sdkmanager_path" --licenses >/dev/null || true
+          "$sdkmanager_path" "ndk;${ANDROID_NDK_VERSION}"
+          ndk_path="$sdk_root/ndk/$ANDROID_NDK_VERSION"
           test -x "$ndk_path/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android${ANDROID_API}-clang"
           echo "ANDROID_NDK=$ndk_path" >> "$GITHUB_ENV"
 
