@@ -11,6 +11,7 @@ fail() {
 
 loader="$ROOT/system/bin/hideport_loader"
 [[ -s "$loader" ]] || fail "Missing executable: $loader; run ./build.sh first"
+[[ -f "$ROOT/module_process.sh" ]] || fail "Missing module_process.sh"
 
 btf_source=""
 for candidate in "$ROOT/btf/vmlinux.btf" "$ROOT/vmlinux.btf"; do
@@ -42,10 +43,10 @@ kernel_btf_sha256=$btf_sha
 loader_sha256=$loader_sha
 EOF_MANIFEST
 
-if [[ -f "$HOME/hideport-deps/android-arm64/build-inputs.txt" ]]; then
-    cat "$HOME/hideport-deps/android-arm64/build-inputs.txt" >> "$ROOT/build-manifest.txt"
-elif [[ -n "${PREFIX:-}" && -f "$PREFIX/build-inputs.txt" ]]; then
+if [[ -n "${PREFIX:-}" && -f "$PREFIX/build-inputs.txt" ]]; then
     cat "$PREFIX/build-inputs.txt" >> "$ROOT/build-manifest.txt"
+elif [[ -f "$HOME/hideport-deps/android-arm64/build-inputs.txt" ]]; then
+    cat "$HOME/hideport-deps/android-arm64/build-inputs.txt" >> "$ROOT/build-manifest.txt"
 fi
 
 (
@@ -56,6 +57,7 @@ fi
         post-fs-data.sh
         service.sh
         hideport_start.sh
+        module_process.sh
         customize.sh
         uninstall.sh
         kernel_btf.sha256
